@@ -8,9 +8,9 @@ use bdk::wallet::export::WalletExport;
 use bdk::{Wallet, SignOptions, KeychainKind};
 use bdk::database::MemoryDatabase;
 use bdk::blockchain::{noop_progress, ElectrumBlockchain};
-use bdk::bitcoin::{Network, Address, Transaction};
+use bdk::bitcoin::{Network, Address, Transaction, Script};
 
-use bdk::electrum_client::Client;
+use bdk::electrum_client::{Client, ElectrumApi};
 use bdk::wallet::AddressIndex;
 
 use std::str::FromStr;
@@ -35,6 +35,42 @@ pub fn load_or_create_wallet(electrum_url: &str, network: &Network, xpriv: &Exte
     wallet
 }
 */
+
+pub struct AdditionalAddrInfo {
+    pub index: u64,
+    pub address: String,
+    pub tx_count: u64,
+    pub balance: u64
+}
+
+pub fn get_batch_history_and_balance(electrum_url: &str, scripts: &Vec::<Script>) -> Vec::<AdditionalAddrInfo> {
+    // let client = Client::new("ssl://electrum.blockstream.info:60002").unwrap();
+
+    let client = Client::new(electrum_url).unwrap();
+
+    let history_list = client.batch_script_get_history(scripts).unwrap();
+    let balance_list = client.batch_script_get_balance(scripts).unwrap();
+
+    let mut result = Vec::<AdditionalAddrInfo>::new();
+
+    for n in 0..scripts.len() {
+        let index: u64 = n.try_into().expect("cannot convert");
+        let script = &scripts[n];
+        let address = Address::from_script(&script, Network::Testnet).unwrap().to_string();
+        let balance = balance_list[n].confirmed;
+        let tx_count = history_list[n].len().try_into().expect("cannot convert");;
+
+        result.push(AdditionalAddrInfo {
+            index,
+            address,
+            tx_count,
+            balance
+        });
+
+    }
+
+    return result;
+}
 
 pub fn load_or_create_wallet(electrum_url: &str, network: &Network, external_descriptor: &str, internal_descriptor: &str)  -> Wallet<ElectrumBlockchain, MemoryDatabase>
 {

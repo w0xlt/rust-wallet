@@ -8,12 +8,17 @@ use bdk::wallet::AddressIndex;
 use iced::{button,text_input, Application, executor, Command, Clipboard, Element, Text, Settings, TextInput, Length, Column, Button, Scrollable, Container, scrollable};
 use iced::HorizontalAlignment;
 
-mod w_electrum;
 
+
+use std::collections::HashSet;
 use std::hash::Hash;
 use std::str::FromStr;
 
+mod w_electrum;
+mod test_electrum;
+
 pub fn main() -> iced::Result {
+
     RuWallet::run(Settings::default())
 }
 
@@ -38,7 +43,7 @@ struct RuWallet{
 
     create_wallet_button_state: button::State,
 
-    used_address_items: Vec<String>,
+    address_items: Vec<String>,
 
     new_address: String,
 
@@ -78,50 +83,55 @@ impl Application for RuWallet {
             RuWalletMessage::CreateWallet => {
                 println!("{}", "Generating wallet ...");
 
-                self.used_address_items.clear();
+                self.address_items.clear();
                 self.new_address.clear();
                 self.utxo_items.clear();
 
                 let wallet = block_on(self.generate_wallet());
 
-                println!("{}", "Wallet generated ...");
+                self.address_items = block_on(self.get_external_addresses(&wallet));
 
-                let new_address_info = wallet.get_address(AddressIndex::New).unwrap();
-
-                for n in 0..new_address_info.index {
-                    let address = wallet.get_address(AddressIndex::Peek(n)).unwrap().address;
-                    // println!("address {}: {}", n, address);
-                    self.used_address_items.push(address.to_string());
-                }
-
-                self.new_address = new_address_info.address.to_string();
-
-                // println!("new_address {}", self.new_address);
+                self.new_address = wallet.get_address(AddressIndex::New).unwrap().address.to_string();
 
                 for utxo in wallet.list_unspent().unwrap().iter() {
 
-                  //  let addr = Script::new_v0_wpkh(utxo.txout.script_pubkey.hash(state));
-
                     let addr = Address::from_script(&utxo.txout.script_pubkey, Network::Testnet).unwrap();
-                    self.utxo_items.push(
-                        format!("{}: {} sats", addr.to_string(), utxo.txout.value)
-                    );
 
-                    // println!("utxo {}: {}", addr, utxo.txout.value);
+                    self.utxo_items.push(
+                        format!("{}:{} - {} - {} sats", utxo.outpoint.txid, utxo.outpoint.vout, addr.to_string(), utxo.txout.value)
+                    );
                 }
 
-                let tx_list = wallet.list_transactions(false).unwrap();
+                let mut tx_list = wallet.list_transactions(true).unwrap();
+
+                tx_list.sort_by(|a, b|
+                    b.confirmation_time.as_ref().unwrap().height.cmp(&a.confirmation_time.as_ref().unwrap().height));
 
                 for tx in tx_list.iter() {
 
-                    println!("{}: {} sats received, {} sats sent", tx.txid, tx.received, tx.sent);
+                    let mut amount_i64: Option<i64> = None;
+                    let mut amount_u64:Option<u64> = None;
 
-                    self.transaction_items.push(
-                        format!("{}: {} sats received, {} sats sent", tx.txid, tx.received, tx.sent)
-                    );
+                    let x= tx.received.overflowing_sub(tx.sent);
+
+                    let height = tx.confirmation_time.as_ref().unwrap().height;
+
+                    if x.1 {
+                        amount_i64 = Some(x.0 as i64);
+                    } else {
+                        amount_u64 = Some(x.0);
+                    }
+
+                    if let Some(i) = amount_u64 {
+                        self.transaction_items.push(
+                            format!("{} - amount: {} sats - height: {}", tx.txid, i, height)
+                        );
+                    } else if let Some(i) = amount_i64 {
+                        self.transaction_items.push(
+                            format!("{} - amount: {} sats - height: {}", tx.txid, i, height)
+                        );
+                    }
                 }
-
-
             },
         }
 
@@ -173,15 +183,15 @@ impl Application for RuWallet {
 
 
         // show used addresses
-        if !self.used_address_items.is_empty() {
+        if !self.address_items.is_empty() {
 
-            let used_addresses_title = Text::new("Used Addresses")
+            let used_addresses_title = Text::new("Address List")
                 .width(Length::Fill)
                 .size(45)
                 .color([0.5, 0.5, 0.5])
                 .horizontal_alignment(HorizontalAlignment::Left);
 
-            let used_address_list = self.used_address_items
+            let used_address_list = self.address_items
                 .iter()
                 .enumerate()
                 .fold(Column::new().spacing(20), |column, (_i, address_item)| {
@@ -301,6 +311,31 @@ impl RuWallet {
             );
 
         wallet
+    }
+
+    async fn get_external_addresses(&self, wallet: &Wallet<ElectrumBlockchain, MemoryDatabase>) -> Vec::<String> {
+
+        let electrum_url = "ssl://electrum.blockstream.info:60002";
+
+        let mut scripts = Vec::<Script>::new();
+
+        for n in 0..30 {
+            let address_info = wallet.get_address(AddressIndex::Peek(n)).unwrap();
+
+            scripts.push(address_info.script_pubkey());
+        }
+
+        let additional_addr_info =
+            w_electrum::get_batch_history_and_balance(electrum_url, &scripts);
+
+        let mut result = Vec::<String>::new();
+
+        for aai in additional_addr_info {
+            println!("{} {}: {} txs - {} sats", aai.index, aai.address, aai.tx_count, aai.balance);
+            result.push(format!("{} {}: {} txs - {} sats", aai.index, aai.address, aai.tx_count, aai.balance));
+        }
+
+        result
     }
 }
 
