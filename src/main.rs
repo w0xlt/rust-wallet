@@ -1,21 +1,37 @@
 use async_std::task::block_on;
-use bdk::Wallet;
+use bdk::{Wallet, Error};
 use bdk::bitcoin::{Network, Script, Address};
 use bdk::blockchain::ElectrumBlockchain;
 use bdk::database::MemoryDatabase;
 use bdk::electrum_client::ElectrumApi;
-use bdk::wallet::AddressIndex;
-use iced::{button,text_input, Application, executor, Command, Clipboard, Element, Text, Settings, TextInput, Length, Column, Button, Scrollable, Container, scrollable, Row, Align, window};
+use bdk::wallet::{AddressIndex, AddressInfo};
+use iced::{button,text_input, Application, executor, Command, Clipboard, Element, Text, Settings, TextInput, Length, Column, Button, Scrollable, Container, scrollable, Row, Align, window, Font};
 use iced::HorizontalAlignment;
+
+use bdk::miniscript::descriptor::DescriptorTrait;
+
+
+use bdk::descriptor::derived::AsDerived;
 
 
 
 use std::collections::HashSet;
 use std::hash::Hash;
+use std::option;
 use std::str::FromStr;
 
 mod w_electrum;
 mod test_electrum;
+
+const ROBOTO: Font = Font::External {
+    name: "RobotoMono-Regular",
+    bytes: include_bytes!("../fonts/RobotoMono-Regular.ttf"),
+};
+
+const ROBOTO_BOLD: Font = Font::External {
+    name: "RobotoMono-Bold",
+    bytes: include_bytes!("../fonts/RobotoMono-Bold.ttf"),
+};
 
 pub fn main() -> iced::Result {
 
@@ -28,14 +44,6 @@ pub fn main() -> iced::Result {
     })
 }
 
-/*
-#[derive(Debug, Default)]
-struct RWallet {
-    input: text_input::State,
-    input_value: String
-}
-
-*/
 #[derive(Debug, Default)]
 struct AddressRow {
     index: u64,
@@ -76,6 +84,8 @@ struct RuWallet{
 
     address_items: Vec<AddressRow>,
 
+    internal_address_items: Vec<AddressRow>,
+
     utxo_items: Vec<UTXORow>,
 
     transaction_items: Vec<TransactionRow>
@@ -114,12 +124,15 @@ impl Application for RuWallet {
 
                 self.address_items.clear();
                 self.new_address.clear();
+                self.internal_address_items.clear();
                 self.utxo_items.clear();
                 self.transaction_items.clear();
 
                 let wallet = block_on(self.generate_wallet());
 
                 self.address_items = block_on(self.get_external_addresses(&wallet));
+
+                self.internal_address_items = block_on(self.get_internal_addresses(&wallet));
 
                 self.new_address = wallet.get_address(AddressIndex::New).unwrap().address.to_string();
 
@@ -176,11 +189,12 @@ impl Application for RuWallet {
 
     fn view(&mut self) -> Element<Self::Message> {
 
-        let title = Text::new("R Wallet")
-                    .width(Length::Fill)
-                    .size(100)
-                    .color([0.5, 0.5, 0.5])
-                    .horizontal_alignment(HorizontalAlignment::Center);
+        let title = Text::new("Rust Wallet")
+            .font(ROBOTO_BOLD)
+            .width(Length::Fill)
+            .size(100)
+            .color([0.5, 0.5, 0.5])
+            .horizontal_alignment(HorizontalAlignment::Center);
 
         let external_descriptor_input = TextInput::new(
             &mut self.external_descriptor_input_state,
@@ -189,7 +203,8 @@ impl Application for RuWallet {
             Self::Message::ExternalDescriptorInputChanged
         )
         .padding(15)
-        .size(30);
+        .size(20)
+        .font(ROBOTO);
         //.on_submit(Self::Message::CreateWallet);
 
         let internal_descriptor_input = TextInput::new(
@@ -199,7 +214,8 @@ impl Application for RuWallet {
             Self::Message::InternalDescriptorInputChanged
         )
         .padding(15)
-        .size(30);
+        .size(20)
+        .font(ROBOTO);
         //.on_submit(Self::Message::CreateWallet);
 
         let create_wallet_button = Button::new(
@@ -219,49 +235,55 @@ impl Application for RuWallet {
         if !self.address_items.is_empty() {
 
             let address_list_title = Text::new("Address List")
+                .font(ROBOTO_BOLD)
                 .width(Length::Fill)
-                .size(45)
+                .size(35)
                 .color([0.5, 0.5, 0.5])
                 .horizontal_alignment(HorizontalAlignment::Left);
 
             let mut address_table: Column<RuWalletMessage> = Column::new()
                 .width(iced::Length::FillPortion(1000))
-                .spacing(30);
+                .spacing(10);
 
 
             let mut table_header: Row<RuWalletMessage> = Row::new()
                 .align_items(Align::Start)
-                .spacing(20);
+                .spacing(10);
 
             table_header = table_header
                 .push(
                     Text::new("Index")
+                        .font(ROBOTO)
                         .width(Length::Units(50))
-                        .size(20)
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Type")
+                        .font(ROBOTO)
                         .width(Length::Units(110))
-                        .size(20)
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Address")
-                        .width(Length::Units(510))
-                        .size(20)
+                        .font(ROBOTO)
+                        .width(Length::Units(410))
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Balance (sats)")
+                        .font(ROBOTO)
                         .width(Length::Units(150))
-                        .size(20)
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Tx Count")
+                        .font(ROBOTO)
                         .width(Length::Units(90))
-                        .size(20)
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 );
 
@@ -272,29 +294,82 @@ impl Application for RuWallet {
 
                 let mut table_row = Row::new()
                     .align_items(Align::Start)
-                    .spacing(20);
+                    .spacing(10);
 
                 let addr_index_text = Text::new(addr_item.index.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(50))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let addr_type_text = Text::new("receiving")
+                    .font(ROBOTO)
                     .width(Length::Units(110))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let addr_text = Text::new(addr_item.address.to_string())
-                    .width(Length::Units(510))
+                    .font(ROBOTO)
+                    .width(Length::Units(410))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let addr_balance_text = Text::new(addr_item.balance.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(150))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
 
                 let addr_tx_count_text = Text::new(addr_item.tx_count.to_string())
+                    .font(ROBOTO)
+                    .width(Length::Units(90))
+                    .size(20)
+                    .horizontal_alignment(HorizontalAlignment::Right);
+
+                table_row = table_row
+                    .push(addr_index_text)
+                    .push(addr_type_text)
+                    .push(addr_text)
+                    .push(addr_balance_text)
+                    .push(addr_tx_count_text);
+
+                address_table = address_table.push(table_row);
+
+            }
+
+
+            for addr_item in &self.internal_address_items {
+
+                let mut table_row = Row::new()
+                    .align_items(Align::Start)
+                    .spacing(10);
+
+                let addr_index_text = Text::new(addr_item.index.to_string())
+                    .font(ROBOTO)
+                    .width(Length::Units(50))
+                    .size(20)
+                    .horizontal_alignment(HorizontalAlignment::Left);
+
+                let addr_type_text = Text::new("change")
+                    .font(ROBOTO)
+                    .width(Length::Units(110))
+                    .size(20)
+                    .horizontal_alignment(HorizontalAlignment::Left);
+
+                let addr_text = Text::new(addr_item.address.to_string())
+                    .font(ROBOTO)
+                    .width(Length::Units(410))
+                    .size(20)
+                    .horizontal_alignment(HorizontalAlignment::Left);
+
+                let addr_balance_text = Text::new(addr_item.balance.to_string())
+                    .font(ROBOTO)
+                    .width(Length::Units(150))
+                    .size(20)
+                    .horizontal_alignment(HorizontalAlignment::Right);
+
+                let addr_tx_count_text = Text::new(addr_item.tx_count.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(90))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
@@ -319,12 +394,14 @@ impl Application for RuWallet {
         if !self.new_address.is_empty() {
 
             let new_address_title = Text::new("Current Receive Address")
-            .width(Length::Fill)
-            .size(45)
-            .color([0.5, 0.5, 0.5])
-            .horizontal_alignment(HorizontalAlignment::Left);
+                .font(ROBOTO_BOLD)
+                .width(Length::Fill)
+                .size(35)
+                .color([0.5, 0.5, 0.5])
+                .horizontal_alignment(HorizontalAlignment::Left);
 
             let new_address_text =Text::new(&self.new_address)
+                .font(ROBOTO)
                 .width(Length::Fill)
                 .size(20)
                 .horizontal_alignment(HorizontalAlignment::Left);
@@ -337,43 +414,48 @@ impl Application for RuWallet {
         if !self.utxo_items.is_empty() {
 
             let unspent_list_title = Text::new("Unspent List")
+                .font(ROBOTO_BOLD)
                 .width(Length::Fill)
-                .size(45)
+                .size(35)
                 .color([0.5, 0.5, 0.5])
                 .horizontal_alignment(HorizontalAlignment::Left);
 
             let mut unspent_table: Column<RuWalletMessage> = Column::new()
                 .width(iced::Length::Fill)
-                .spacing(30);
+                .spacing(10);
 
             let mut table_header: Row<RuWalletMessage> = Row::new()
                 .align_items(Align::Start)
-                .spacing(20);
+                .spacing(10);
 
             table_header = table_header
                 .push(
                     Text::new("Output Point")
-                        .width(Length::Units(710))
-                        .size(20)
+                        .font(ROBOTO_BOLD)
+                        .width(Length::Units(610))
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Address")
-                        .width(Length::Units(510))
-                        .size(20)
+                        .font(ROBOTO_BOLD)
+                        .width(Length::Units(410))
+                        .size(18)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Amount (sats)")
+                        .font(ROBOTO_BOLD)
                         .width(Length::Units(150))
-                        .size(20)
-                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .size(18)
+                        .horizontal_alignment(HorizontalAlignment::Right)
                 )
                 .push(
                     Text::new("Height")
+                        .font(ROBOTO_BOLD)
                         .width(Length::Units(110))
-                        .size(20)
-                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .size(18)
+                        .horizontal_alignment(HorizontalAlignment::Right)
                 );
 
             unspent_table = unspent_table.push(table_header);
@@ -382,26 +464,30 @@ impl Application for RuWallet {
 
                 let mut table_row: Row<RuWalletMessage> = Row::new()
                     .align_items(Align::Start)
-                    .spacing(20);
+                    .spacing(10);
 
                 let txid_vout = format!("{}:{}", utxo_item.txid.to_string(), utxo_item.vout);
 
                 let txid_text = Text::new(txid_vout)
-                    .width(Length::Units(710))
+                    .font(ROBOTO)
+                    .width(Length::Units(610))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let address_text = Text::new(&utxo_item.address)
-                    .width(Length::Units(510))
+                    .font(ROBOTO)
+                    .width(Length::Units(410))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let address_amount = Text::new(utxo_item.amount.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(150))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
 
                 let height = Text::new(utxo_item.height.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(110))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
@@ -423,37 +509,41 @@ impl Application for RuWallet {
         if !self.transaction_items.is_empty() {
 
             let tx_list_title = Text::new("Transaction List")
+                .font(ROBOTO_BOLD)
                 .width(Length::Fill)
-                .size(45)
+                .size(35)
                 .color([0.5, 0.5, 0.5])
                 .horizontal_alignment(HorizontalAlignment::Left);
 
             let mut transaaction_table: Column<RuWalletMessage> = Column::new()
                 .width(iced::Length::Fill)
-                .spacing(30);
+                .spacing(10);
 
             let mut table_header: Row<RuWalletMessage> = Row::new()
                 .align_items(Align::Start)
-                .spacing(20);
+                .spacing(10);
 
             table_header = table_header
                 .push(
                     Text::new("Transaction Id")
-                        .width(Length::Units(710))
+                        .font(ROBOTO_BOLD)
+                        .width(Length::Units(610))
                         .size(20)
                         .horizontal_alignment(HorizontalAlignment::Left)
                 )
                 .push(
                     Text::new("Amount (sats)")
+                        .font(ROBOTO_BOLD)
                         .width(Length::Units(150))
                         .size(20)
-                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .horizontal_alignment(HorizontalAlignment::Right)
                 )
                 .push(
                     Text::new("Height")
+                        .font(ROBOTO_BOLD)
                         .width(Length::Units(110))
                         .size(20)
-                        .horizontal_alignment(HorizontalAlignment::Left)
+                        .horizontal_alignment(HorizontalAlignment::Right)
                 );
 
             transaaction_table = transaaction_table.push(table_header);
@@ -462,19 +552,22 @@ impl Application for RuWallet {
 
                 let mut table_row: Row<RuWalletMessage> = Row::new()
                     .align_items(Align::Start)
-                    .spacing(20);
+                    .spacing(10);
 
                 let txid_text = Text::new(&transaction_item.txid)
-                    .width(Length::Units(710))
+                    .font(ROBOTO)
+                    .width(Length::Units(610))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Left);
 
                 let amount_text = Text::new(transaction_item.amount.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(150))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
 
                 let height_amount = Text::new(transaction_item.height.to_string())
+                    .font(ROBOTO)
                     .width(Length::Units(110))
                     .size(20)
                     .horizontal_alignment(HorizontalAlignment::Right);
@@ -530,6 +623,7 @@ impl RuWallet {
             let address_info = wallet.get_address(AddressIndex::Peek(n)).unwrap();
 
             scripts.push(address_info.script_pubkey());
+
         }
 
         let additional_addr_info =
@@ -549,5 +643,49 @@ impl RuWallet {
         }
 
         result
+    }
+
+    async fn get_internal_addresses(&self, wallet: &Wallet<ElectrumBlockchain, MemoryDatabase>) -> Vec::<AddressRow> {
+
+        let electrum_url = "ssl://electrum.blockstream.info:60002";
+
+        let mut scripts = Vec::<Script>::new();
+
+        for n in 0..10 {
+            let address_info = self.peek_change_address(wallet, n).unwrap();
+
+            scripts.push(address_info.script_pubkey());
+
+        }
+
+        let additional_addr_info =
+            w_electrum::get_batch_history_and_balance(electrum_url, &scripts);
+
+        let mut result = Vec::<AddressRow>::new();
+
+        for aai in additional_addr_info {
+            result.push(
+                AddressRow {
+                    index: aai.index,
+                    address: aai.address,
+                    balance: aai.balance,
+                    tx_count: aai.tx_count
+                }
+            );
+        }
+
+        result
+    }
+
+
+    fn peek_change_address(&self, wallet: &Wallet<ElectrumBlockchain, MemoryDatabase>, index: u32) -> Result<AddressInfo, Error> {
+
+        let result_descriptor = wallet.get_descriptor_for_keychain(bdk::KeychainKind::Internal);
+
+        result_descriptor
+            .as_derived(index, wallet.secp_ctx())
+            .address(wallet.network())
+            .map(|address| AddressInfo { index, address })
+            .map_err(|_| Error::ScriptDoesntHaveAddressForm)
     }
 }

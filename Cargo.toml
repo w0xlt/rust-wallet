@@ -9,8 +9,10 @@ edition = "2021"
 iced = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bdk = { version = "0.15.0", default-feature = false, features = ["compiler", "all-keys", "key-value-db", "rpc", "compact_filters"] }
+
 dirs-next = "2.0"
+bdk = { git = "https://github.com/w0xlt/bdk.git", branch = "change_derived_mod_visibility", default-feature = false, features = ["compiler", "all-keys", "key-value-db", "rpc", "compact_filters"]  }
+
 futures = "0.3.19"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
